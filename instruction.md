@@ -1,5 +1,1 @@
-# Configure cmake boost openssl https
-A CMake-based C++ project using Boost.Asio and OpenSSL fails at link time due to missing SSL and crypto libraries. 
-Update CMakeLists.txt (or build invocation) to correctly find and link OpenSSL and required Boost components, then 
-verify the resulting HTTPS client connects to example.com and prints the HTTP status code.
-
+Diagnose and fix linker failures in a CMake-based C++ project using GoogleTest and pthreads, manifesting as undefined references to gtest_main and pthread symbols. Update CMakeLists.txt to properly find and link GTest::GTest, GTest::Main, and Threads::Threads, enable POSITION_INDEPENDENT_CODE, then verify that tests compile, link, and run successfully.

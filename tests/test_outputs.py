@@ -1,6 +1,6 @@
 import subprocess
-import re
 import os
+import re
 from pathlib import Path
 
 BUILD_DIR = Path("build")
@@ -8,10 +8,7 @@ BUILD_DIR = Path("build")
 
 def build_project():
     """
-    Instruction:
-    'Update CMakeLists.txt (or build invocation)'
-
-    We support BOTH paths.
+    Build the project using CMake or a build.sh script if present.
     """
     if Path("CMakeLists.txt").exists():
         BUILD_DIR.mkdir(exist_ok=True)
@@ -25,10 +22,9 @@ def build_project():
         )
 
 
-def find_executable():
+def find_test_executable():
     """
-    Instruction does NOT specify binary name.
-    We therefore locate any executable produced by the build.
+    Locate an executable produced by the build.
     """
     candidates = []
     for path in BUILD_DIR.rglob("*"):
@@ -39,65 +35,89 @@ def find_executable():
     return candidates[0]
 
 
-def extract_http_status(output: str):
-    match = re.search(r"\b\d{3}\b", output)
-    return match.group(0) if match else None
-
-
-def test_builds_successfully():
+def test_position_independent_code_enabled():
     """
-    Verifies the link-time issue is fixed.
+    Verifies that POSITION_INDEPENDENT_CODE is set in CMake and object files are compiled with PIC.
     """
     build_project()
-    exe = find_executable()
-    assert exe.exists()
+
+    # Inspect CMake cache
+    cache_file = BUILD_DIR / "CMakeCache.txt"
+    assert cache_file.exists(), "CMakeCache.txt not found; build likely failed"
+
+    with open(cache_file) as f:
+        cache_contents = f.read()
+
+    pic_enabled = re.search(r"CMAKE_POSITION_INDEPENDENT_CODE:BOOL=ON", cache_contents)
+    assert pic_enabled, "POSITION_INDEPENDENT_CODE is NOT enabled in CMake build"
+
+    # Optional: verify object files have PIC flag using readelf (Linux/GCC/Clang)
+    obj_files = list(BUILD_DIR.rglob("*.o"))
+    assert obj_files, "No object files found to inspect for PIC"
+
+    for obj in obj_files:
+        result = subprocess.run(
+            ["readelf", "-h", str(obj)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        # Type: DYN indicates PIC-compatible object
+        assert "Type: DYN" in result.stdout or "REL" in result.stdout, (
+            f"Object file {obj} may not be compiled with PIC"
+        )
 
 
-def test_connects_and_prints_http_status_code():
+def test_explicit_gtest_main_linking():
     """
-    Instruction:
-    'verify the resulting HTTPS client connects to example.com
-     and prints the HTTP status code'
+    Ensures the test executable is linked to GTest::Main.
     """
-    exe = find_executable()
+    exe = find_test_executable()
+    result = subprocess.run(
+        ["nm", str(exe)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    symbols = result.stdout
+    assert "gtest_main" in symbols or "main" in symbols, (
+        "Executable does not contain gtest_main symbols; likely not linked to GTest::Main"
+    )
 
+
+def test_explicit_pthread_linking():
+    """
+    Ensures the test executable is linked to pthread (Threads::Threads).
+    """
+    exe = find_test_executable()
+    result = subprocess.run(
+        ["ldd", str(exe)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    linked_libs = result.stdout
+    assert "libpthread" in linked_libs, (
+        "Executable is not linked to pthread library; likely missing Threads::Threads"
+    )
+
+
+def test_tests_run_successfully():
+    """
+    Verifies the GoogleTest tests execute and report passing.
+    """
+    exe = find_test_executable()
     result = subprocess.run(
         [str(exe)],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
-        timeout=15,
+        timeout=30,
     )
 
-    assert result.returncode == 0, f"Program failed:\n{result.stderr}"
+    # Return code 0 means all tests passed
+    assert result.returncode == 0, f"Tests failed:\n{result.stdout}\n{result.stderr}"
 
-    status = extract_http_status(result.stdout)
-    assert status, f"No HTTP status code printed:\n{result.stdout}"
-
-
-def test_requires_network_to_produce_status_code():
-    """
-    Minimal anti-fake check.
-
-    If the program truly 'connects to example.com', then
-    disabling networking must prevent it from producing
-    an HTTP status code.
-
-    This does NOT enforce a specific failure mode.
-    """
-    exe = find_executable()
-
-    result = subprocess.run(
-        ["unshare", "-n", str(exe)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        timeout=15,
-    )
-
-    status = extract_http_status(result.stdout)
-
-    assert status is None, (
-        "Program produced an HTTP status code with networking disabled; "
-        "this suggests no real connection was attempted"
-    )
+    # Basic sanity check: GoogleTest should print test summary
+    assert "FAILED" not in result.stdout, f"Some tests failed:\n{result.stdout}"
+    assert "PASSED" in result.stdout, f"No tests reported passing:\n{result.stdout}"

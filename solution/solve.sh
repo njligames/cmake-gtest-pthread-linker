@@ -1,98 +1,79 @@
-cat <<'EOF' > main.cpp
-#include <boost/asio.hpp>
-#include <boost/asio/ssl.hpp>
-#include <boost/asio/ssl/host_name_verification.hpp>
-#include <openssl/ssl.h>
-#include <iostream>
-#include <string>
-
-using boost::asio::ip::tcp;
-
-int main() {
-    try {
-        boost::asio::io_context io;
-        boost::asio::ssl::context ctx(boost::asio::ssl::context::tls_client);
-
-        ctx.set_default_verify_paths();
-        ctx.set_options(
-            boost::asio::ssl::context::default_workarounds |
-            boost::asio::ssl::context::no_sslv2 |
-            boost::asio::ssl::context::no_sslv3 |
-            boost::asio::ssl::context::no_tlsv1 |
-            boost::asio::ssl::context::no_tlsv1_1
-        );
-
-        boost::asio::ssl::stream<tcp::socket> socket(io, ctx);
-
-        // REQUIRED: certificate + hostname verification
-        socket.set_verify_mode(boost::asio::ssl::verify_peer);
-        socket.set_verify_callback(
-            boost::asio::ssl::host_name_verification("example.com")
-        );
-
-        // REQUIRED: set SNI (this is what was missing)
-        if (!SSL_set_tlsext_host_name(socket.native_handle(), "example.com")) {
-            throw std::runtime_error("Failed to set SNI hostname");
-        }
-
-        tcp::resolver resolver(io);
-        auto endpoints = resolver.resolve("example.com", "443");
-        boost::asio::connect(socket.lowest_layer(), endpoints);
-
-        socket.handshake(boost::asio::ssl::stream_base::client);
-
-        std::string request =
-            "GET / HTTP/1.1\r\n"
-            "Host: example.com\r\n"
-            "Connection: close\r\n\r\n";
-
-        boost::asio::write(socket, boost::asio::buffer(request));
-
-        boost::asio::streambuf response;
-        boost::asio::read_until(socket, response, "\r\n");
-
-        std::istream response_stream(&response);
-        std::string http_version;
-        unsigned int status_code;
-
-        response_stream >> http_version >> status_code;
-
-        std::cout << status_code << std::endl;
-    }
-    catch (const std::exception& e) {
-        std::cerr << "Error: " << e.what() << std::endl;
-        return 1;
-    }
-
-    return 0;
-}
-
-EOF
+mkdir -p include
+mkdir -p src
+mkdir -p tests
 
 cat <<'EOF' > CMakeLists.txt
 cmake_minimum_required(VERSION 3.16)
-project(main LANGUAGES CXX)
+project(MyProject CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# Boost (Asio depends on boost::system)
-find_package(Boost REQUIRED COMPONENTS system)
+enable_testing()
 
-# OpenSSL (required for TLS)
-find_package(OpenSSL REQUIRED)
+# Find Threads (pthreads)
+find_package(Threads REQUIRED)
 
-add_executable(main
-    main.cpp
+# Fetch GoogleTest automatically
+include(FetchContent)
+
+FetchContent_Declare(
+    googletest
+    URL https://github.com/google/googletest/archive/refs/tags/release-1.17.0.zip
+)
+# Prevent overriding the parent project's compiler/linker settings
+set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(googletest)
+
+# Main library
+add_library(MyLibrary
+    src/foo.cpp
+)
+target_include_directories(MyLibrary PUBLIC include)
+
+# Test executable
+add_executable(MyLibraryTests
+    tests/test_foo.cpp
 )
 
-target_include_directories(main PRIVATE
-    ${Boost_INCLUDE_DIRS}
+# Link libraries
+target_link_libraries(MyLibraryTests
+    PRIVATE
+        MyLibrary
+        GTest::GTest
+        GTest::Main
+        Threads::Threads
 )
 
-target_link_libraries(main PRIVATE
-    Boost::system
-    OpenSSL::SSL
-    OpenSSL::Crypto
-)
+# Discover tests
+include(GoogleTest)
+gtest_discover_tests(MyLibraryTests)
+EOF
+
+cat <<'EOF' > include/foo.h
+#pragma once
+
+int add(int a, int b);
+EOF
+
+cat <<'EOF' > src/foo.cpp
+#include "foo.h"
+
+int add(int a, int b) {
+    return a + b;
+}
+EOF
+
+cat <<'EOF' > tests/test_foo.cpp
+#include "foo.h"
+#include <gtest/gtest.h>
+
+TEST(FooTest, AddPositiveNumbers) {
+    EXPECT_EQ(add(2, 3), 5);
+}
+
+TEST(FooTest, AddNegativeNumbers) {
+    EXPECT_EQ(add(-2, -3), -5);
+}
 EOF
